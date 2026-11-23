@@ -20,6 +20,9 @@ ANSWER_SUBMITTED_PREFIX = "ANSWER_SUBMITTED:"
 MAX_SUBMIT_NUDGES = 3
 # When this many iterations remain, warn the model to wrap up and submit
 BUDGET_WARNING_REMAINING = 5
+# In the last N iterations, only expose the finishing tool(s) so the model must submit
+FORCE_FINISH_REMAINING = 3
+FINISH_TOOL_NAMES = frozenset({"submit_answer"})
 
 type ToolFunction = Callable[..., str]
 
@@ -251,8 +254,14 @@ class Agent:
         )
         self.reset_conversation()
 
-    def _get_tool_definitions(self) -> list[dict[str, Any]]:
-        """Get tool definitions in OpenAI-compatible format."""
+    def _get_tool_definitions(self, finish_only: bool = False) -> list[dict[str, Any]]:
+        """Get tool definitions in OpenAI-compatible format.
+
+        With finish_only=True, only the finishing tools are exposed (hard step budget).
+        """
+        tools = [t for t in self.tools.values() if not finish_only or t.name in FINISH_TOOL_NAMES]
+        if not tools:  # no finishing tool registered - fall back to all tools
+            tools = list(self.tools.values())
         return [
             {
                 "type": "function",
@@ -262,7 +271,7 @@ class Agent:
                     "parameters": tool.parameters,
                 },
             }
-            for tool in self.tools.values()
+            for tool in tools
         ]
 
     def _execute_tool(self, tool_call: ToolCall) -> str:
@@ -281,12 +290,14 @@ class Agent:
         except Exception as e:
             return f"Error executing {tool_call.name}: {e}"
 
-    def _generate_response(self, conversation: Conversation) -> Iterator[AgentEvent]:
+    def _generate_response(
+        self, conversation: Conversation, finish_only: bool = False
+    ) -> Iterator[AgentEvent]:
         """Generate a response from the model, streaming the events out."""
         yield AgentEvent(type=EventType.GENERATION_START)
 
         messages = conversation.to_api_format(compression=self._compression)
-        tools = self._get_tool_definitions() if self.tools else None
+        tools = self._get_tool_definitions(finish_only) if self.tools else None
 
         full_content = ""
         tool_calls: list[dict[str, Any]] = []
@@ -383,7 +394,18 @@ class Agent:
             full_response = ""
             tool_calls_data: list[dict[str, Any]] = []
 
-            for event in self._generate_response(self.conversation):
+            finish_only = remaining <= FORCE_FINISH_REMAINING
+            if finish_only and remaining == FORCE_FINISH_REMAINING:
+                self.conversation.messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            "Exploration tools are now disabled. Call submit_answer with "
+                            "your best query immediately."
+                        ),
+                    )
+                )
+            for event in self._generate_response(self.conversation, finish_only):
                 yield event
                 if event.type == EventType.GENERATION_END:
                     full_response = event.data.get("full_response", "")
