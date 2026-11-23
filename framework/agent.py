@@ -16,6 +16,9 @@ from framework.llm import OpenRouterClient, OpenRouterConfig, TokenUsage
 # This avoids global state - the tool result signals completion
 ANSWER_SUBMITTED_PREFIX = "ANSWER_SUBMITTED:"
 
+# How many times to remind the model to call a tool when it stops with plain text
+MAX_SUBMIT_NUDGES = 3
+
 type ToolFunction = Callable[..., str]
 
 
@@ -355,6 +358,7 @@ class Agent:
 
         # Track cumulative token usage across all iterations
         total_usage = TokenUsage()
+        nudges = 0
 
         for iteration in range(self.config.max_iterations):
             yield AgentEvent(type=EventType.ITERATION_START, data={"iteration": iteration + 1})
@@ -375,37 +379,24 @@ class Agent:
             tool_calls = _parse_tool_calls_from_api(tool_calls_data)
 
             if not tool_calls:
-                # Check if this is an empty response (model just stopped)
-                is_empty_response = not full_response or not full_response.strip()
-
-                # Check if response looks like a malformed tool call (JSON with "query" key)
-                # This happens when the model outputs tool call arguments as plain text
-                looks_like_failed_tool_call = (full_response and "{" in full_response)
-
-                if is_empty_response or looks_like_failed_tool_call:
-                    # Model returned empty response or malformed tool call
-                    # Inject a continuation prompt to remind it to properly call submit_answer
-                    if looks_like_failed_tool_call:
-                        print("\n[DEBUG] Response looks like failed tool call "
-                              "- injecting continuation prompt")
-                    else:
-                        print("\n[DEBUG] Empty response detected "
-                              "- injecting continuation prompt")
-
+                # The model stopped without calling a tool (e.g. it wrote the SQL as plain
+                # text). Nudge it to use the tool instead of ending without an answer.
+                if nudges < MAX_SUBMIT_NUDGES:
+                    nudges += 1
                     self.conversation.messages.append(
-                        Message(role="assistant", content=full_response if full_response else "")
+                        Message(role="assistant", content=full_response or "")
                     )
                     self.conversation.messages.append(
                         Message(
                             role="user",
                             content=(
-                                "You must use the submit_answer TOOL to submit your "
-                                "answer - do not output JSON directly. "
-                                "Call the submit_answer tool now with your SQL query."
+                                "You did not call a tool. Do not answer in plain text. "
+                                "If you have verified your final query, call the "
+                                "submit_answer TOOL now with it; otherwise continue "
+                                "investigating with the tools."
                             ),
                         )
                     )
-                    # Continue to next iteration instead of returning
                     continue
 
                 # Non-empty response without tool calls - agent is done

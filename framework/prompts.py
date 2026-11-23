@@ -17,10 +17,14 @@ clarification - make the most reasonable interpretation and proceed.
 1. Identify the schema(s) involved (see the schema index below).
 2. Find the business-rule guide(s) for that data. Guide titles sometimes use a different \
 database name than the warehouse schema, and many guides cover data that is not in this \
-warehouse, so use `search_guides` with schema/table/column names and key terms from the \
-question, then `read_guide` to read the relevant guide IN FULL. Do this for every question, \
-even if it looks simple - guides define company-specific metric definitions, filters, \
-exclusions, sentinel/test values and NULL semantics that the question does not repeat.
+warehouse. The guide index below shows which schemas each guide mentions - prefer guides \
+that mention the schema you are querying (a guide about schema X does not govern schema Y). \
+Also `search_guides` for the business terms used in the question (e.g. "transaction value", \
+"classification", "long tail", "major"): the guide that defines a term also tells you which \
+table and filters it implies. Then `read_guide` the relevant guide(s) IN FULL. Do this \
+for every question, even if it looks simple - guides define company-specific metric \
+definitions, filters, exclusions, sentinel/test values and NULL semantics that the \
+question does not repeat.
 3. Inspect the tables with `describe_schema`; use `profile_column` / `run_sql` to check exact \
 codes, spellings, casing, units, date formats and NULLs before filtering on them.
 4. Write the query, run it with `run_sql`, sanity-check the result (row count, NULLs, \
@@ -35,6 +39,19 @@ this extract and which do not (e.g. adjustments that need data that does not exi
 those clarifications; do not invent adjustments, mappings or weights that the data cannot support.
 - Rules about a different kind of metric do not apply (e.g. a carrier-performance exclusion \
 does not apply to a route count unless the guide says so).
+- Paragraphs near the end of a guide (scope / available data / clarifications) refine the \
+bullet rules above them and are authoritative when they conflict.
+- Data-quality exclusions (test records, sentinel values, legacy/invalid rows) apply to every \
+measure computed from that table, including counts, unless the guide limits them.
+- When the guide maps codes to named categories/classifications/regions, output the guide's \
+labels (e.g. CASE WHEN status = 'A' THEN '<label from guide>' ...), not the raw codes.
+- Respect metric-specific inclusion rules: a rule can exclude rows from one measure (e.g. an \
+average or a count) while keeping them in another (e.g. a total) - use FILTER (WHERE ...) for \
+per-measure conditions instead of a global WHERE.
+- Grain: when a threshold applies to an entity-period (e.g. per player per season, per \
+account), aggregate to that grain first (sum across stints/rows), then apply the threshold.
+- A vague term in the question ("major", "large", "long tail", "active") is usually \
+defined in the guide; use that definition.
 - Explicit instructions in the question override the guide.
 
 # Output shape
@@ -56,14 +73,15 @@ You MUST finish every task by calling `submit_answer`; never answer in plain tex
 @cache
 def build_system_prompt() -> str:
     # Lazy imports: tools depend on framework.agent, so avoid an import cycle.
-    from tools.db_tools import list_schemas_overview
+    from tools.db_tools import list_schemas_overview, schema_names
     from tools.guide_tools import guides_overview
 
     try:
         schemas = list_schemas_overview()
+        names = schema_names()
     except Exception as e:  # database missing etc. - degrade gracefully
-        schemas = f"(unavailable: {e})"
-    guides = guides_overview() or "(no guides found)"
+        schemas, names = f"(unavailable: {e})", []
+    guides = guides_overview(names) or "(no guides found)"
     return (
         f"{BASE_PROMPT}\n# Warehouse schemas (schema: tables)\n{schemas}\n\n"
         f"# Business-rule guides (name: title)\n{guides}\n"

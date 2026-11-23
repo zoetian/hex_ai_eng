@@ -4,7 +4,7 @@ from framework.agent import ANSWER_SUBMITTED_PREFIX, Tool
 from framework.database import execute_query
 
 
-def submit_answer(query: str) -> str:
+def submit_answer(query: str, rule_checklist: str = "") -> str:
     """Submit a SQL query as the final answer to the evaluation.
 
     The query is executed first; if it fails or returns no rows, the submission is NOT
@@ -52,8 +52,17 @@ SUBMIT_ANSWER: Tool = Tool(
                     "(e.g., 'SELECT * FROM schema.table')."
                 ),
             },
+            "rule_checklist": {
+                "type": "string",
+                "description": (
+                    "Before submitting, list each guide rule / question requirement that "
+                    "applies (definitions, exclusions, test/sentinel values, NULL handling, "
+                    "labels, grain, rounding, tie-breaks, output columns) and say exactly "
+                    "where the query implements it. Write 'N/A' for none."
+                ),
+            },
         },
-        "required": ["query"],
+        "required": ["rule_checklist", "query"],
     },
     function=submit_answer,
 )

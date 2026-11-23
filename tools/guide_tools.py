@@ -21,15 +21,25 @@ def _guide_files() -> list[Path]:
     return sorted(GUIDES_DIR.glob("*.md")) if GUIDES_DIR.exists() else []
 
 
-def guides_overview() -> str:
-    """One line per guide: file name and its title (first heading). For the system prompt."""
+def guides_overview(schema_names: list[str] | None = None) -> str:
+    """One line per guide: name, title, and which warehouse schemas its text mentions.
+
+    Schema mentions are detected automatically (whole-word, case-insensitive match of
+    each schema name in the guide text), so the index stays correct as guides or the
+    warehouse change.
+    """
     lines = []
     for path in _guide_files():
-        title = next(
-            (ln.lstrip("# ").strip() for ln in path.read_text().splitlines() if ln.strip()),
-            "",
-        )
-        lines.append(f"- {path.stem}: {title}")
+        text = path.read_text()
+        title = next((ln.lstrip("# ").strip() for ln in text.splitlines() if ln.strip()), "")
+        line = f"- {path.stem}: {title}"
+        if schema_names:
+            hits = [
+                s for s in schema_names
+                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(s)}(?![A-Za-z0-9_])", text, re.I)
+            ]
+            line += f" [mentions schemas: {', '.join(hits)}]" if hits else " [no schema match]"
+        lines.append(line)
     return "\n".join(lines)
 
 

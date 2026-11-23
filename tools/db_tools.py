@@ -46,6 +46,11 @@ def format_df(df: pl.DataFrame, max_rows: int = MAX_PREVIEW_ROWS) -> str:
     return "\n".join(lines)
 
 
+def schema_names() -> list[str]:
+    df = _run("SELECT DISTINCT schema_name FROM duckdb_tables() WHERE NOT internal")
+    return sorted(df["schema_name"].to_list())
+
+
 def list_schemas_overview() -> str:
     """One line per schema: name and its table names (used in the system prompt)."""
     df = _run(
