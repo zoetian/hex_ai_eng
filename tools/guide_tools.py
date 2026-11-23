@@ -21,12 +21,34 @@ def _guide_files() -> list[Path]:
     return sorted(GUIDES_DIR.glob("*.md")) if GUIDES_DIR.exists() else []
 
 
+def _schema_mentions(text: str, title: str, schema_names: list[str]) -> list[str]:
+    """Schemas a guide is about, strongest first.
+
+    Case-sensitive whole-word matches. A schema counts if it appears in the title, in a
+    code literal (`schema` / schema.table), or at least twice - this filters out
+    incidental English words (e.g. "Credit transactions" in a banking guide).
+    """
+    scored = []
+    for s in schema_names:
+        word = rf"(?<![A-Za-z0-9_]){re.escape(s)}(?![A-Za-z0-9_])"
+        n = len(re.findall(word, text))
+        if not n:
+            continue
+        strong = bool(
+            re.search(word, title)
+            or re.search(rf"`{re.escape(s)}[`.]", text)
+            or re.search(rf"(?<![A-Za-z0-9_]){re.escape(s)}\.[A-Za-z_]", text)
+        )
+        if strong or n >= 2:
+            scored.append((not strong, -n, s))
+    return [f"{s}" for _, _, s in sorted(scored)]
+
+
 def guides_overview(schema_names: list[str] | None = None) -> str:
     """One line per guide: name, title, and which warehouse schemas its text mentions.
 
-    Schema mentions are detected automatically (whole-word, case-insensitive match of
-    each schema name in the guide text), so the index stays correct as guides or the
-    warehouse change.
+    Schema mentions are detected automatically from the guide text (see _schema_mentions),
+    so the index stays correct as guides or the warehouse change.
     """
     lines = []
     for path in _guide_files():
@@ -34,11 +56,8 @@ def guides_overview(schema_names: list[str] | None = None) -> str:
         title = next((ln.lstrip("# ").strip() for ln in text.splitlines() if ln.strip()), "")
         line = f"- {path.stem}: {title}"
         if schema_names:
-            hits = [
-                s for s in schema_names
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(s)}(?![A-Za-z0-9_])", text, re.I)
-            ]
-            line += f" [mentions schemas: {', '.join(hits)}]" if hits else " [no schema match]"
+            hits = _schema_mentions(text, title, schema_names)
+            line += f" [schemas: {', '.join(hits)}]" if hits else " [no schema in warehouse]"
         lines.append(line)
     return "\n".join(lines)
 

@@ -6,6 +6,7 @@ streaming chat completions with tool calling.
 
 import json
 import logging
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -60,7 +61,14 @@ class OpenRouterConfig:
     # Provider routing - no restriction by default
     provider: dict[str, Any] = field(default_factory=dict)
     # Reasoning configuration
-    reasoning: dict[str, Any] | None = None
+    # (overridable via HECKS_REASONING_EFFORT=low|medium|high for experiments)
+    reasoning: dict[str, Any] | None = field(
+        default_factory=lambda: (
+            {"effort": os.environ["HECKS_REASONING_EFFORT"]}
+            if os.environ.get("HECKS_REASONING_EFFORT")
+            else None
+        )
+    )
     # Timeout for receiving first token (also applies between subsequent chunks)
     # If no data is received within this time, the request will timeout
     first_token_timeout: float = 10.0
