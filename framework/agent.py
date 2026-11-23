@@ -18,6 +18,8 @@ ANSWER_SUBMITTED_PREFIX = "ANSWER_SUBMITTED:"
 
 # How many times to remind the model to call a tool when it stops with plain text
 MAX_SUBMIT_NUDGES = 3
+# When this many iterations remain, warn the model to wrap up and submit
+BUDGET_WARNING_REMAINING = 5
 
 type ToolFunction = Callable[..., str]
 
@@ -362,6 +364,21 @@ class Agent:
 
         for iteration in range(self.config.max_iterations):
             yield AgentEvent(type=EventType.ITERATION_START, data={"iteration": iteration + 1})
+
+            remaining = self.config.max_iterations - iteration
+            if remaining == BUDGET_WARNING_REMAINING:
+                # Budget warning: thorough (high-reasoning) runs otherwise explore until
+                # they hit max_iterations and end with no answer at all.
+                self.conversation.messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            f"Step budget: only {remaining} tool-call rounds remain. Stop "
+                            "exploring. Finalize your best query now and call submit_answer "
+                            "within the next 1-2 steps."
+                        ),
+                    )
+                )
 
             full_response = ""
             tool_calls_data: list[dict[str, Any]] = []
