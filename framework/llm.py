@@ -6,6 +6,8 @@ streaming chat completions with tool calling.
 
 import json
 import logging
+import os
+import ssl
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,9 +39,20 @@ def _is_read_timeout_error(exception: BaseException) -> bool:
     return isinstance(exception, httpx.ReadTimeout)
 
 
+def _is_transient_network_error(exception: BaseException) -> bool:
+    """Connection resets, TLS errors and upstream 5xx are worth retrying."""
+    if isinstance(exception, httpx.HTTPStatusError):
+        return exception.response.status_code >= 500
+    return isinstance(exception, (httpx.TransportError, ssl.SSLError, ConnectionError))
+
+
 def _is_retryable_error(exception: BaseException) -> bool:
-    """Check if the exception is retryable (rate limit or read timeout)."""
-    return _is_rate_limit_error(exception) or _is_read_timeout_error(exception)
+    """Check if the exception is retryable (rate limit, timeout, transient network)."""
+    return (
+        _is_rate_limit_error(exception)
+        or _is_read_timeout_error(exception)
+        or _is_transient_network_error(exception)
+    )
 
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -60,7 +73,14 @@ class OpenRouterConfig:
     # Provider routing - no restriction by default
     provider: dict[str, Any] = field(default_factory=dict)
     # Reasoning configuration
-    reasoning: dict[str, Any] | None = None
+    # (overridable via HECKS_REASONING_EFFORT=low|medium|high for experiments)
+    reasoning: dict[str, Any] | None = field(
+        default_factory=lambda: (
+            {"effort": os.environ["HECKS_REASONING_EFFORT"]}
+            if os.environ.get("HECKS_REASONING_EFFORT")
+            else None
+        )
+    )
     # Timeout for receiving first token (also applies between subsequent chunks)
     # If no data is received within this time, the request will timeout
     first_token_timeout: float = 10.0

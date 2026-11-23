@@ -16,6 +16,14 @@ from framework.llm import OpenRouterClient, OpenRouterConfig, TokenUsage
 # This avoids global state - the tool result signals completion
 ANSWER_SUBMITTED_PREFIX = "ANSWER_SUBMITTED:"
 
+# How many times to remind the model to call a tool when it stops with plain text
+MAX_SUBMIT_NUDGES = 3
+# When this many iterations remain, warn the model to wrap up and submit
+BUDGET_WARNING_REMAINING = 5
+# In the last N iterations, only expose the finishing tool(s) so the model must submit
+FORCE_FINISH_REMAINING = 3
+FINISH_TOOL_NAMES = frozenset({"submit_answer"})
+
 type ToolFunction = Callable[..., str]
 
 
@@ -246,8 +254,14 @@ class Agent:
         )
         self.reset_conversation()
 
-    def _get_tool_definitions(self) -> list[dict[str, Any]]:
-        """Get tool definitions in OpenAI-compatible format."""
+    def _get_tool_definitions(self, finish_only: bool = False) -> list[dict[str, Any]]:
+        """Get tool definitions in OpenAI-compatible format.
+
+        With finish_only=True, only the finishing tools are exposed (hard step budget).
+        """
+        tools = [t for t in self.tools.values() if not finish_only or t.name in FINISH_TOOL_NAMES]
+        if not tools:  # no finishing tool registered - fall back to all tools
+            tools = list(self.tools.values())
         return [
             {
                 "type": "function",
@@ -257,7 +271,7 @@ class Agent:
                     "parameters": tool.parameters,
                 },
             }
-            for tool in self.tools.values()
+            for tool in tools
         ]
 
     def _execute_tool(self, tool_call: ToolCall) -> str:
@@ -276,12 +290,14 @@ class Agent:
         except Exception as e:
             return f"Error executing {tool_call.name}: {e}"
 
-    def _generate_response(self, conversation: Conversation) -> Iterator[AgentEvent]:
+    def _generate_response(
+        self, conversation: Conversation, finish_only: bool = False
+    ) -> Iterator[AgentEvent]:
         """Generate a response from the model, streaming the events out."""
         yield AgentEvent(type=EventType.GENERATION_START)
 
         messages = conversation.to_api_format(compression=self._compression)
-        tools = self._get_tool_definitions() if self.tools else None
+        tools = self._get_tool_definitions(finish_only) if self.tools else None
 
         full_content = ""
         tool_calls: list[dict[str, Any]] = []
@@ -343,18 +359,10 @@ class Agent:
         yield AgentEvent(type=EventType.GENERATION_END, data=event_data)
 
     def _get_system_message(self) -> str:
-        """Get the system message for the agent."""
-        return (
-            "You are an autonomous SQL agent. You must complete tasks independently "
-            "without asking the user for clarification or additional information. "
-            "Use the available tools to gather any information you need. "
-            "If you're uncertain, make your best assumptions and proceed.\n\n"
-            "CRITICAL: You MUST call the 'submit_answer' tool to complete EVERY task. "
-            "NEVER stop without calling submit_answer. Even if you've computed the answer, "
-            "you MUST submit it via submit_answer with a valid SQL query.\n\n"
-            "Do not provide answers as plain text - always use the submit_answer tool "
-            "with a valid SQL query that generates a dataframe with the intended answer."
-        )
+        """Get the system message for the agent (schema + guide index + workflow)."""
+        from framework.prompts import build_system_prompt
+
+        return build_system_prompt()
 
     def run(self, prompt: str) -> Iterator[AgentEvent]:
         """Run the agent with streaming output, from the user's natural language prompt."""
@@ -363,14 +371,41 @@ class Agent:
 
         # Track cumulative token usage across all iterations
         total_usage = TokenUsage()
+        nudges = 0
 
         for iteration in range(self.config.max_iterations):
             yield AgentEvent(type=EventType.ITERATION_START, data={"iteration": iteration + 1})
 
+            remaining = self.config.max_iterations - iteration
+            if remaining == BUDGET_WARNING_REMAINING:
+                # Budget warning: thorough (high-reasoning) runs otherwise explore until
+                # they hit max_iterations and end with no answer at all.
+                self.conversation.messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            f"Step budget: only {remaining} tool-call rounds remain. Stop "
+                            "exploring. Finalize your best query now and call submit_answer "
+                            "within the next 1-2 steps."
+                        ),
+                    )
+                )
+
             full_response = ""
             tool_calls_data: list[dict[str, Any]] = []
 
-            for event in self._generate_response(self.conversation):
+            finish_only = remaining <= FORCE_FINISH_REMAINING
+            if finish_only and remaining == FORCE_FINISH_REMAINING:
+                self.conversation.messages.append(
+                    Message(
+                        role="user",
+                        content=(
+                            "Exploration tools are now disabled. Call submit_answer with "
+                            "your best query immediately."
+                        ),
+                    )
+                )
+            for event in self._generate_response(self.conversation, finish_only):
                 yield event
                 if event.type == EventType.GENERATION_END:
                     full_response = event.data.get("full_response", "")
@@ -383,37 +418,24 @@ class Agent:
             tool_calls = _parse_tool_calls_from_api(tool_calls_data)
 
             if not tool_calls:
-                # Check if this is an empty response (model just stopped)
-                is_empty_response = not full_response or not full_response.strip()
-
-                # Check if response looks like a malformed tool call (JSON with "query" key)
-                # This happens when the model outputs tool call arguments as plain text
-                looks_like_failed_tool_call = (full_response and "{" in full_response)
-
-                if is_empty_response or looks_like_failed_tool_call:
-                    # Model returned empty response or malformed tool call
-                    # Inject a continuation prompt to remind it to properly call submit_answer
-                    if looks_like_failed_tool_call:
-                        print("\n[DEBUG] Response looks like failed tool call "
-                              "- injecting continuation prompt")
-                    else:
-                        print("\n[DEBUG] Empty response detected "
-                              "- injecting continuation prompt")
-
+                # The model stopped without calling a tool (e.g. it wrote the SQL as plain
+                # text). Nudge it to use the tool instead of ending without an answer.
+                if nudges < MAX_SUBMIT_NUDGES:
+                    nudges += 1
                     self.conversation.messages.append(
-                        Message(role="assistant", content=full_response if full_response else "")
+                        Message(role="assistant", content=full_response or "")
                     )
                     self.conversation.messages.append(
                         Message(
                             role="user",
                             content=(
-                                "You must use the submit_answer TOOL to submit your "
-                                "answer - do not output JSON directly. "
-                                "Call the submit_answer tool now with your SQL query."
+                                "You did not call a tool. Do not answer in plain text. "
+                                "If you have verified your final query, call the "
+                                "submit_answer TOOL now with it; otherwise continue "
+                                "investigating with the tools."
                             ),
                         )
                     )
-                    # Continue to next iteration instead of returning
                     continue
 
                 # Non-empty response without tool calls - agent is done

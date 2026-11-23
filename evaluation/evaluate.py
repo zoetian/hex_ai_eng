@@ -49,7 +49,7 @@ from evaluation.compare import loosely_compare_dataframes
 from framework.agent import ANSWER_SUBMITTED_PREFIX, Agent, AgentEvent, EventType, Tool
 from framework.database import execute_query
 from framework.llm import OpenRouterConfig, TokenUsage
-from tools.submit_answer import SUBMIT_ANSWER
+from tools.registry import all_tools
 
 # =============================================================================
 # Evaluation Configuration
@@ -143,11 +143,7 @@ def create_tools() -> dict[str, Tool]:
     Returns:
         A dictionary mapping tool names to Tool objects.
     """
-    return {
-        SUBMIT_ANSWER.name: SUBMIT_ANSWER,
-        # Add your custom tools here:
-        # MY_TOOL.name: MY_TOOL,
-    }
+    return all_tools()
 
 
 # =============================================================================
