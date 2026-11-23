@@ -14,7 +14,7 @@ from rich.prompt import Prompt
 from framework.agent import Agent, Tool
 from framework.llm import OpenRouterConfig
 from framework.stream_printer import StreamPrinter
-from tools.submit_answer import SUBMIT_ANSWER
+from tools.registry import all_tools
 
 
 def create_tools() -> dict[str, Tool]:
@@ -23,10 +23,7 @@ def create_tools() -> dict[str, Tool]:
     Returns:
         Dictionary mapping tool names to Tool instances.
     """
-    return {
-        SUBMIT_ANSWER.name: SUBMIT_ANSWER,
-        # You can add your own tools here to test!
-    }
+    return all_tools()
 
 
 def create_agent(api_key: str) -> Agent:
